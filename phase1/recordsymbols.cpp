@@ -74,3 +74,60 @@ unsigned int la_version(unsigned int version) {
 char *la_objsearch(const char *name, uintptr_t *cookie, unsigned int flag) {
   return const_cast<char *>(name);
 }
+
+/*
+   The dynamic linker invokes one of these functions when a symbol
+   binding occurs between two shared objects that have been marked
+   for auditing notification by la_objopen().  The la_symbind32()
+   function is employed on 32-bit platforms; the la_symbind64()
+   function is employed on 64-bit platforms.
+   The sym argument is a pointer to a structure that provides
+   information about the symbol being bound.  The structure
+   definition is shown in <elf.h>.  Among the fields of this
+   structure, st_value indicates the address to which the symbol is
+   bound.
+   The ndx argument gives the index of the symbol in the symbol
+   table of the bound shared object.
+   The refcook argument identifies the shared object that is making
+   the symbol reference; this is the same identifier that is
+   provided to the la_objopen() function that returned
+   LA_FLG_BINDFROM.  The defcook argument identifies the shared
+   object that defines the referenced symbol; this is the same
+   identifier that is provided to the la_objopen() function that
+   returned LA_FLG_BINDTO.
+   The symname argument points a string containing the name of the
+   symbol.
+   The flags argument is a bit mask that both provides information
+   about the symbol and can be used to modify further auditing of
+   this PLT (Procedure Linkage Table) entry.  The dynamic linker may
+   supply the following bit values in this argument:
+   LA_SYMB_DLSYM
+          The binding resulted from a call to dlsym(3).
+   LA_SYMB_ALTVALUE
+          A previous la_symbind*() call returned an alternate value
+          for this symbol.
+   By default, if the auditing library implements la_pltenter() and
+   la_pltexit() functions (see below), then these functions are
+   invoked, after la_symbind(), for PLT entries, each time the
+   symbol is referenced.  The following flags can be ORed into
+   *flags to change this default behavior:
+   LA_SYMB_NOPLTENTER
+          Don't call la_pltenter() for this symbol.
+   LA_SYMB_NOPLTEXIT
+          Don't call la_pltexit() for this symbol.
+   The return value of la_symbind32() and la_symbind64() is the
+   address to which control should be passed after the function
+   returns.  If the auditing library is simply monitoring symbol
+   bindings, then it should return sym->st_value.  A different value
+   may be returned if the library wishes to direct control to an
+   alternate location.
+*/
+uintptr_t la_symbind32(Elf32_Sym *sym, unsigned int ndx, uintptr_t *refcook,
+               uintptr_t *defcook, unsigned int *flags, const char *symname) {
+  return sym->st_value;
+}
+
+uintptr_t la_symbind64(Elf64_Sym *sym, unsigned int ndx, uintptr_t *refcook,
+               uintptr_t *defcook, unsigned int *flags, const char *symname) {
+  return sym->st_value;
+}
