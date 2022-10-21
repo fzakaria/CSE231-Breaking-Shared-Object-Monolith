@@ -1,5 +1,7 @@
 #include <link.h>
 
+#include <iostream>
+
 __attribute__((constructor)) static void init() {
   // Note: Cannot use print here.
 }
@@ -38,6 +40,7 @@ unsigned int la_version(unsigned int version) {
   if (version == 0) {
     return version;
   }
+  std::cout << "Taking control of the linking search...." << std::endl;
   return LAV_CURRENT;
 }
 
@@ -123,11 +126,13 @@ char *la_objsearch(const char *name, uintptr_t *cookie, unsigned int flag) {
    alternate location.
 */
 uintptr_t la_symbind32(Elf32_Sym *sym, unsigned int ndx, uintptr_t *refcook,
-               uintptr_t *defcook, unsigned int *flags, const char *symname) {
+                       uintptr_t *defcook, unsigned int *flags,
+                       const char *symname) {
   return sym->st_value;
 }
 
 uintptr_t la_symbind64(Elf64_Sym *sym, unsigned int ndx, uintptr_t *refcook,
-               uintptr_t *defcook, unsigned int *flags, const char *symname) {
+                       uintptr_t *defcook, unsigned int *flags,
+                       const char *symname) {
   return sym->st_value;
 }
