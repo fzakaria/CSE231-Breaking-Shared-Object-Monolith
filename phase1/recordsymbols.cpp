@@ -1,6 +1,13 @@
 #include <link.h>
 
+#include <filesystem>
 #include <iostream>
+#include <sstream>
+
+#include "sqlite3.h"
+
+// A pointer to the database that exists
+static sqlite3 *db;
 
 __attribute__((constructor)) static void init() {
   // Note: Cannot use print here.
@@ -41,41 +48,84 @@ unsigned int la_version(unsigned int version) {
     return version;
   }
   std::cout << "Taking control of the linking search...." << std::endl;
+
+  /**
+   * Let's setup our sqlite3 database now.
+   */
+  int error = sqlite3_open("database.db", &db);
+  if (error != SQLITE_OK) {
+    std::cerr << sqlite3_errstr(error) << std::endl;
+    exit(1);
+  }
+
+  // Create our table
+  std::string sql =
+      R""""(
+      DROP TABLE IF EXISTS Libraries;
+      DROP TABLE IF EXISTS Symbols;
+      DROP TABLE IF EXISTS Usages;
+      CREATE TABLE Libraries(Name TEXT PRIMARY KEY, Path TEXT);
+      CREATE TABLE Symbols(Name TEXT PRIMARY KEY, Library TEXT);
+      CREATE TABLE Usages(Id INTEGER PRIMARY KEY, Library TEXT, Symbol Text);
+      )"""";
+  char *err_msg = nullptr;
+  error = sqlite3_exec(db, sql.c_str(), 0, 0, &err_msg);
+
+  if (error != SQLITE_OK) {
+    std::cerr << err_msg << std::endl;
+    sqlite3_free(err_msg);
+    sqlite3_close(db);
+    exit(1);
+  }
+
   return LAV_CURRENT;
 }
 
 /*
-    The dynamic linker invokes this function to inform the auditing
-    library that it is about to search for a shared object.  The name
-    argument is the filename or pathname that is to be searched for.
-    cookie identifies the shared object that initiated the search.
-    flag is set to one of the following values:
-    LA_SER_ORIG
-           This is the original name that is being searched for.
-          Typically, this name comes from an ELF DT_NEEDED entry, or
-          is the filename argument given to dlopen(3).
-   LA_SER_LIBPATH
-          name was created using a directory specified in
-          LD_LIBRARY_PATH.
-    LA_SER_RUNPATH
-          name was created using a directory specified in an ELF
-          DT_RPATH or DT_RUNPATH list.
-   LA_SER_CONFIG
-          name was found via the ldconfig(8) cache
-          (/etc/ld.so.cache).
-   LA_SER_DEFAULT
-          name was found via a search of one of the default
-          directories.
-   LA_SER_SECURE
-          name is specific to a secure object (unused on Linux).
-   As its function result, la_objsearch() returns the pathname that
-   the dynamic linker should use for further processing.  If NULL is
-   returned, then this pathname is ignored for further processing.
-   If this audit library simply intends to monitor search paths,
-   then name should be returned.
+    The dynamic linker calls this function when a new shared object
+    is loaded.  The map argument is a pointer to a link-map structure
+    that describes the object.  The lmid field has one of the
+    following values
+    LM_ID_BASE
+          Link map is part of the initial namespace.
+    LM_ID_NEWLM
+          Link map is part of a new namespace requested via
+          dlmopen(3).
+    cookie is a pointer to an identifier for this object.  The
+    identifier is provided to later calls to functions in the
+    auditing library in order to identify this object.  This
+    identifier is initialized to point to object's link map, but the
+    audit library can change the identifier to some other value that
+    it may prefer to use to identify the object.
+    As its return value, la_objopen() returns a bit mask created by
+    ORing zero or more of the following constants, which allow the
+    auditing library to select the objects to be monitored by
+    la_symbind*():
+    LA_FLG_BINDTO
+          Audit symbol bindings to this object.
+    LA_FLG_BINDFROM
+          Audit symbol bindings from this object.
+    A return value of 0 from la_objopen() indicates that no symbol
+    bindings should be audited for this object.
 */
-char *la_objsearch(const char *name, uintptr_t *cookie, unsigned int flag) {
-  return const_cast<char *>(name);
+unsigned int la_objopen(struct link_map *map, Lmid_t lmid, uintptr_t *cookie) {
+  std::ostringstream s;
+  s << "INSERT INTO Libraries(Name, Path) VALUES ('" << map->l_name << "','"
+    << std::filesystem::path(map->l_name).filename().string() << "'"
+    << ");";
+  std::string sql = s.str();
+
+  char *err_msg = nullptr;
+  int error = sqlite3_exec(db, sql.c_str(), 0, 0, &err_msg);
+
+  if (error != SQLITE_OK) {
+    std::cerr << err_msg << std::endl;
+    sqlite3_free(err_msg);
+    sqlite3_close(db);
+    exit(1);
+  }
+
+  return LA_FLG_BINDTO | LA_FLG_BINDFROM;
 }
 
 /*
