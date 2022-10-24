@@ -1,13 +1,17 @@
+#include <elf.h>
 #include <link.h>
 
 #include <filesystem>
 #include <iostream>
 #include <sstream>
+#include <unordered_map>
 
 #include "sqlite3.h"
 
 // A pointer to the database that exists
 static sqlite3 *db;
+
+static std::unordered_map<uintptr_t, std::string> cookie_map;
 
 __attribute__((constructor)) static void init() {
   // Note: Cannot use print here.
@@ -65,8 +69,8 @@ unsigned int la_version(unsigned int version) {
       DROP TABLE IF EXISTS Symbols;
       DROP TABLE IF EXISTS Usages;
       CREATE TABLE Libraries(Name TEXT PRIMARY KEY, Path TEXT);
-      CREATE TABLE Symbols(Name TEXT PRIMARY KEY, Library TEXT);
-      CREATE TABLE Usages(Id INTEGER PRIMARY KEY, Library TEXT, Symbol Text);
+      CREATE TABLE Symbols(Name TEXT, Library TEXT);
+      CREATE TABLE Usages(Library TEXT, Symbol Text);
       )"""";
   char *err_msg = nullptr;
   error = sqlite3_exec(db, sql.c_str(), 0, 0, &err_msg);
@@ -79,6 +83,71 @@ unsigned int la_version(unsigned int version) {
   }
 
   return LAV_CURRENT;
+}
+
+/**
+ * Could not get my interpretation of the code below to work.
+ * This is the code from Musl's dynamic linker
+ * @see
+ * http://git.musl-libc.org/cgit/musl/tree/src/ldso/dynlink.c?id=c5ab5bd3be15eb9d49222df132a51ae8e8f78cbc#n1554
+ */
+size_t gnu_hash_symtab_len_musl(const ElfW(Word) * base_address) {
+  uint32_t nsym;
+  const uint32_t *buckets;
+  const uint32_t *hashval;
+  buckets = reinterpret_cast<const uint32_t *>(
+      base_address + 4 + (base_address[2] * sizeof(size_t) / 4));
+  for (size_t i = nsym = 0; i < base_address[0]; i++) {
+    if (buckets[i] > nsym) nsym = buckets[i];
+  }
+  if (nsym) {
+    nsym -= base_address[1];
+    hashval = buckets + base_address[0] + nsym;
+    do nsym++;
+    while (!(*hashval++ & 1));
+  }
+  return nsym;
+}
+
+size_t gnu_hash_symtab_len(const ElfW(Word) * base_address) {
+  // https://chromium-review.googlesource.com/c/crashpad/crashpad/+/876879
+  // See https://flapenguin.me/2017/05/10/elf-lookup-dt-gnu-hash/ and
+  // https://sourceware.org/ml/binutils/2006-10/msg00377.html
+  // http://git.musl-libc.org/cgit/musl/tree/src/ldso/dynlink.c?id=c5ab5bd3be15eb9d49222df132a51ae8e8f78cbc#n1554
+  struct gnu_hash_header {
+    uint32_t nbuckets;
+    uint32_t symoffset;
+    uint32_t bloom_size;
+    uint32_t bloom_shift;
+    // uint64_t bloom[bloom_size]; /* uint32_t for 32-bit binaries */
+    // uint32_t buckets[nbuckets];
+    // uint32_t chain[];
+  };
+
+  const gnu_hash_header *header =
+      reinterpret_cast<const gnu_hash_header *>(base_address);
+
+  const uint32_t *buckets = reinterpret_cast<const unsigned *>(
+      base_address + sizeof(gnu_hash_header) +
+      (header->bloom_size * (sizeof(size_t) / 4)));
+
+  // Locate the chain that handles the largest index bucket.
+  uint32_t last_symbol = 0;
+  for (uint32_t i = 0; i < header->nbuckets; ++i) {
+    last_symbol = std::max(buckets[i], last_symbol);
+  }
+
+  // Walk the bucket's chain to add the chain length to the total.
+  const uint32_t *chain = buckets + header->nbuckets;
+  for (;;) {
+    const uint32_t *chain_entry =
+        chain + (last_symbol - header->symoffset) * sizeof(chain_entry);
+    ++last_symbol;
+    // If the low bit is set, this entry is the end of the chain.
+    if (*chain_entry & 1) break;
+  }
+
+  return last_symbol;
 }
 
 /*
@@ -109,6 +178,14 @@ unsigned int la_version(unsigned int version) {
     bindings should be audited for this object.
 */
 unsigned int la_objopen(struct link_map *map, Lmid_t lmid, uintptr_t *cookie) {
+  // This nis not a real shared library and is placed by the Kernel
+  // The rest of the code won't work for it so just skip it for now.
+  // https://man7.org/linux/man-pages/man7/vdso.7.html
+  // TODO(fmzakari): Kernel docs say it's a real ELF format so it should work?
+  if (std::string(map->l_name) == "linux-vdso.so.1") {
+    return LA_FLG_BINDTO | LA_FLG_BINDFROM;
+  }
+
   std::ostringstream s;
   s << "INSERT INTO Libraries(Name, Path) VALUES ('" << map->l_name << "','"
     << std::filesystem::path(map->l_name).filename().string() << "'"
@@ -118,6 +195,67 @@ unsigned int la_objopen(struct link_map *map, Lmid_t lmid, uintptr_t *cookie) {
   char *err_msg = nullptr;
   int error = sqlite3_exec(db, sql.c_str(), 0, 0, &err_msg);
 
+  if (error != SQLITE_OK) {
+    std::cerr << err_msg << std::endl;
+    sqlite3_free(err_msg);
+    sqlite3_close(db);
+    exit(1);
+  }
+
+  // store reference of the cookie as we will need it later
+  cookie_map.insert({*cookie, std::string(map->l_name)});
+
+  // Keep reference to sections we care about
+  const char *strtab = nullptr;
+  const ElfW(Sym) *elf_sym = nullptr;
+  size_t sym_cnt = 0;
+  const ElfW(Dyn) *const dyn_start = map->l_ld;
+  for (const ElfW(Dyn) *dyn = dyn_start; dyn->d_tag != DT_NULL; ++dyn) {
+    ElfW(Addr) base_address = dyn->d_un.d_ptr;
+
+    switch (dyn->d_tag) {
+      case (DT_STRTAB): {
+        strtab = reinterpret_cast<const char *>(base_address);
+        break;
+      }
+      case (DT_SYMTAB): {
+        elf_sym = reinterpret_cast<const ElfW(Sym) *>(base_address);
+        break;
+      }
+      case (DT_GNU_HASH): {
+        sym_cnt = gnu_hash_symtab_len_musl(
+            reinterpret_cast<const ElfW(Word) *>(base_address));
+        break;
+      }
+      case (DT_HASH): {
+        // https://flapenguin.me/elf-dt-hash
+        struct hash_header {
+          uint32_t nbucket;
+          uint32_t nchain;
+        };
+        const hash_header *header =
+            reinterpret_cast<const hash_header *>(base_address);
+        sym_cnt = header->nbucket;
+        break;
+      }
+    }
+  }
+
+  s.str(std::string());  // clear the string stream
+  s << "INSERT INTO Symbols(Name, Library) VALUES ";
+
+  for (size_t sym_index = 0; sym_index < sym_cnt; ++sym_index) {
+    const char *sym_name = &strtab[elf_sym[sym_index].st_name];
+    s << "('" << sym_name << "','" << map->l_name << "'"
+      << ")";
+    if (sym_index < sym_cnt - 1) {
+      s << ",";
+    }
+  }
+
+  s << ";";
+  sql = s.str();
+  error = sqlite3_exec(db, sql.c_str(), 0, 0, &err_msg);
   if (error != SQLITE_OK) {
     std::cerr << err_msg << std::endl;
     sqlite3_free(err_msg);
@@ -178,6 +316,13 @@ unsigned int la_objopen(struct link_map *map, Lmid_t lmid, uintptr_t *cookie) {
 uintptr_t la_symbind32(Elf32_Sym *sym, unsigned int ndx, uintptr_t *refcook,
                        uintptr_t *defcook, unsigned int *flags,
                        const char *symname) {
+  auto ref_library_it = cookie_map.find(*refcook);
+  if (ref_library_it == cookie_map.end()) {
+    std::cerr << "Could not find a cookie. Assertion failed." << std::endl;
+    exit(1);
+  }
+  auto ref_library = ref_library_it->second;
+
   return sym->st_value;
 }
 

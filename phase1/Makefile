@@ -3,7 +3,7 @@ sqlite3.o: sqlite3.c sqlite3.h
 
 recordsymbolslib.so: recordsymbols.cpp sqlite3.o
 	clang++  -std=c++17 -fPIC -shared -O3 -g -o recordsymbolslib.so recordsymbols.cpp sqlite3.o \
-			-Wall -Wextra -Werror -pedantic -Wno-unused-parameter
+			-Wall -Wextra -Werror -pedantic -Wno-unused-parameter -Wno-unused-variable -Wno-unused-but-set-variable
 clean:
 	rm -f recordsymbolslib.so sqlite3.o database.db
 
