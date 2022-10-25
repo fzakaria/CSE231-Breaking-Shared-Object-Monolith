@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <elf.h>
 #include <link.h>
 
@@ -86,8 +87,9 @@ unsigned int la_version(unsigned int version) {
 }
 
 /**
- * Could not get my interpretation of the code below to work.
- * This is the code from Musl's dynamic linker
+ * This is the code from Musl's dynamic linker.
+ * Originally, I could not get my interpretation of the code below to work so we
+ * validated against this implementation.
  * @see
  * http://git.musl-libc.org/cgit/musl/tree/src/ldso/dynlink.c?id=c5ab5bd3be15eb9d49222df132a51ae8e8f78cbc#n1554
  */
@@ -114,9 +116,11 @@ size_t gnu_hash_symtab_len(const ElfW(Word) * base_address) {
   // See https://flapenguin.me/2017/05/10/elf-lookup-dt-gnu-hash/ and
   // https://sourceware.org/ml/binutils/2006-10/msg00377.html
   // http://git.musl-libc.org/cgit/musl/tree/src/ldso/dynlink.c?id=c5ab5bd3be15eb9d49222df132a51ae8e8f78cbc#n1554
+  // http://deroko.phearless.org/dt_gnu_hash.txt
   struct gnu_hash_header {
     uint32_t nbuckets;
-    uint32_t symoffset;
+    uint32_t symoffset;  // symoffset indicates which index in
+                         // DT_SYMTAB (Elf32_Sym) exports are starting
     uint32_t bloom_size;
     uint32_t bloom_shift;
     // uint64_t bloom[bloom_size]; /* uint32_t for 32-bit binaries */
@@ -127,26 +131,35 @@ size_t gnu_hash_symtab_len(const ElfW(Word) * base_address) {
   const gnu_hash_header *header =
       reinterpret_cast<const gnu_hash_header *>(base_address);
 
-  const uint32_t *buckets = reinterpret_cast<const unsigned *>(
-      base_address + sizeof(gnu_hash_header) +
-      (header->bloom_size * (sizeof(size_t) / 4)));
+  const uint32_t *buckets = reinterpret_cast<const uint32_t *>(base_address) +
+                            4 + (header->bloom_size * (sizeof(size_t) / 4));
 
-  // Locate the chain that handles the largest index bucket.
+  // Locate the chain that handles the final symbol
+  // We go through all the buckets and find the largest symbol index
+  // Chains are meant to be contiguous so we just need the largest symbol here.
+  // Order of buckets in the symbol table is not guaranteed.
   uint32_t last_symbol = 0;
   for (uint32_t i = 0; i < header->nbuckets; ++i) {
     last_symbol = std::max(buckets[i], last_symbol);
   }
 
   // Walk the bucket's chain to add the chain length to the total.
-  const uint32_t *chain = buckets + header->nbuckets;
-  for (;;) {
-    const uint32_t *chain_entry =
-        chain + (last_symbol - header->symoffset) * sizeof(chain_entry);
-    ++last_symbol;
-    // If the low bit is set, this entry is the end of the chain.
-    if (*chain_entry & 1) break;
-  }
+  const uint32_t *chains = buckets + header->nbuckets;
 
+  // bucket array holds indexes of the first symbols in the chains in the
+  // symbol table. Note that those are not indexes for the chain array. Indexes
+  // for it will be offset with symoffset.
+  size_t chain_index = last_symbol - header->symoffset;
+
+  // Remove the offset to get the actual index
+  last_symbol -= header->symoffset;
+
+  // At this point we know there is at least one entry
+  // so we use do-while to do the increment first.
+  do {
+    last_symbol++;
+    // If the low bit is set, this entry is the end of the chain.
+  } while (!(chains[chain_index++] & 1));
   return last_symbol;
 }
 
@@ -223,8 +236,15 @@ unsigned int la_objopen(struct link_map *map, Lmid_t lmid, uintptr_t *cookie) {
         break;
       }
       case (DT_GNU_HASH): {
-        sym_cnt = gnu_hash_symtab_len_musl(
+        sym_cnt = gnu_hash_symtab_len(
             reinterpret_cast<const ElfW(Word) *>(base_address));
+        size_t other_cnt = gnu_hash_symtab_len_musl(
+            reinterpret_cast<const ElfW(Word) *>(base_address));
+        if (sym_cnt != other_cnt) {
+          std::cerr << "Expected: " << other_cnt << " Actual: " << sym_cnt
+                    << std::endl;
+          exit(1);
+        }
         break;
       }
       case (DT_HASH): {
