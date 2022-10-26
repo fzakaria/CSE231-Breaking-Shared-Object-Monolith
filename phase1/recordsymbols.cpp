@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <cxxabi.h>
 #include <elf.h>
 #include <link.h>
 
@@ -86,6 +87,28 @@ unsigned int la_version(unsigned int version) {
   return LAV_CURRENT;
 }
 
+/** Demangle a symbol name
+ *
+ * C++ names are mangled and we must demangle them to have the original name.
+ * For simplicity, this function merely exits if an error is found.
+ * @see https://gcc.gnu.org/onlinedocs/libstdc++/manual/ext_demangling.html
+ */
+std::string demangle(std::string mangled_str) {
+  int status;
+  char *demangled_name =
+      abi::__cxa_demangle(mangled_str.c_str(), nullptr, nullptr, &status);
+  if (status == -2) {
+    return mangled_str;
+  }
+  if (status < 0) {
+    std::cerr << "Could not demangle " << mangled_str << std::endl;
+    exit(1);
+  }
+  std::string return_val(demangled_name);
+  free(demangled_name);
+  return return_val;
+}
+
 /**
  * This is the code from Musl's dynamic linker.
  * Originally, I could not get my interpretation of the code below to work so we
@@ -108,7 +131,10 @@ size_t gnu_hash_symtab_len_musl(const ElfW(Word) * base_address) {
     do nsym++;
     while (!(*hashval++ & 1));
   }
-  return nsym;
+
+  // TODO(fmzakari): Why do we want to add the symoffset so that it's equal to
+  // DT_HASH
+  return nsym + base_address[1];
 }
 
 size_t gnu_hash_symtab_len(const ElfW(Word) * base_address) {
@@ -160,7 +186,10 @@ size_t gnu_hash_symtab_len(const ElfW(Word) * base_address) {
     last_symbol++;
     // If the low bit is set, this entry is the end of the chain.
   } while (!(chains[chain_index++] & 1));
-  return last_symbol;
+
+  // TODO(fmzakari): Why do we want to add the symoffset so that it's equal to
+  // DT_HASH
+  return last_symbol + header->symoffset;
 }
 
 /*
@@ -199,9 +228,10 @@ unsigned int la_objopen(struct link_map *map, Lmid_t lmid, uintptr_t *cookie) {
     return LA_FLG_BINDTO | LA_FLG_BINDFROM;
   }
 
+  std::string library = std::filesystem::path(map->l_name).filename().string();
   std::ostringstream s;
   s << "INSERT INTO Libraries(Name, Path) VALUES ('" << map->l_name << "','"
-    << std::filesystem::path(map->l_name).filename().string() << "'"
+    << library << "'"
     << ");";
   std::string sql = s.str();
 
@@ -221,7 +251,8 @@ unsigned int la_objopen(struct link_map *map, Lmid_t lmid, uintptr_t *cookie) {
   // Keep reference to sections we care about
   const char *strtab = nullptr;
   const ElfW(Sym) *elf_sym = nullptr;
-  size_t sym_cnt = 0;
+  size_t sym_cnt_hash = 0;
+  size_t sym_cnt_dt_hash = 0;
   const ElfW(Dyn) *const dyn_start = map->l_ld;
   for (const ElfW(Dyn) *dyn = dyn_start; dyn->d_tag != DT_NULL; ++dyn) {
     ElfW(Addr) base_address = dyn->d_un.d_ptr;
@@ -236,13 +267,13 @@ unsigned int la_objopen(struct link_map *map, Lmid_t lmid, uintptr_t *cookie) {
         break;
       }
       case (DT_GNU_HASH): {
-        sym_cnt = gnu_hash_symtab_len(
+        sym_cnt_dt_hash = gnu_hash_symtab_len(
             reinterpret_cast<const ElfW(Word) *>(base_address));
         size_t other_cnt = gnu_hash_symtab_len_musl(
             reinterpret_cast<const ElfW(Word) *>(base_address));
-        if (sym_cnt != other_cnt) {
-          std::cerr << "Expected: " << other_cnt << " Actual: " << sym_cnt
-                    << std::endl;
+        if (sym_cnt_dt_hash != other_cnt) {
+          std::cerr << "Expected: " << other_cnt
+                    << " Actual: " << sym_cnt_dt_hash << std::endl;
           exit(1);
         }
         break;
@@ -255,18 +286,29 @@ unsigned int la_objopen(struct link_map *map, Lmid_t lmid, uintptr_t *cookie) {
         };
         const hash_header *header =
             reinterpret_cast<const hash_header *>(base_address);
-        sym_cnt = header->nbucket;
+        sym_cnt_hash = header->nchain;
         break;
       }
     }
   }
+
+  if (sym_cnt_hash != 0 && sym_cnt_dt_hash != sym_cnt_hash) {
+    std::cerr << library << ": Has different symbol counts. sym_cnt_dt_hash="
+              << sym_cnt_dt_hash << " sym_cnt_hash==" << sym_cnt_hash
+              << std::endl;
+    exit(1);
+  }
+  size_t sym_cnt = sym_cnt_dt_hash;
 
   s.str(std::string());  // clear the string stream
   s << "INSERT INTO Symbols(Name, Library) VALUES ";
 
   for (size_t sym_index = 0; sym_index < sym_cnt; ++sym_index) {
     const char *sym_name = &strtab[elf_sym[sym_index].st_name];
-    s << "('" << sym_name << "','" << map->l_name << "'"
+    std::string demangled_sym_name = demangle(sym_name);
+    // TODO(fmzakar): This is helpful for debugging. Use GLOG?
+    // std::cout << library << " " << demangled_sym_name << std::endl;
+    s << "('" << demangled_sym_name << "','" << library << "'"
       << ")";
     if (sym_index < sym_cnt - 1) {
       s << ",";

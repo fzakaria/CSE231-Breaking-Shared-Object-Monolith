@@ -1,4 +1,6 @@
 phase1/recordsymbolslib.so
 phase1/sqlite3.o
 phase1/database.db
+phase1/examples/libsimpleshared.so
+phase1/examples/simple
 .vscode/
