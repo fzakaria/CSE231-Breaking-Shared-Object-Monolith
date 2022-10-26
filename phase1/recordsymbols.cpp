@@ -229,6 +229,11 @@ unsigned int la_objopen(struct link_map *map, Lmid_t lmid, uintptr_t *cookie) {
   }
 
   std::string library = std::filesystem::path(map->l_name).filename().string();
+  /// TODO(fmzakari): Find a better name when it's empty which represents the
+  /// process
+  if (library.empty()) {
+    library = "main";
+  }
   std::ostringstream s;
   s << "INSERT INTO Libraries(Name, Path) VALUES ('" << map->l_name << "','"
     << library << "'"
@@ -303,6 +308,7 @@ unsigned int la_objopen(struct link_map *map, Lmid_t lmid, uintptr_t *cookie) {
   s.str(std::string());  // clear the string stream
   s << "INSERT INTO Symbols(Name, Library) VALUES ";
 
+  // TODO(fmzakari): Skip undefined symbols
   for (size_t sym_index = 0; sym_index < sym_cnt; ++sym_index) {
     const char *sym_name = &strtab[elf_sym[sym_index].st_name];
     std::string demangled_sym_name = demangle(sym_name);
