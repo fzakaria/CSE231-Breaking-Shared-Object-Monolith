@@ -312,6 +312,13 @@ unsigned int la_objopen(struct link_map *map, Lmid_t lmid, uintptr_t *cookie) {
   for (size_t sym_index = 0; sym_index < sym_cnt; ++sym_index) {
     const char *sym_name = &strtab[elf_sym[sym_index].st_name];
     std::string demangled_sym_name = demangle(sym_name);
+
+    // Symbols whose section index is undefined means they are imported.
+    // We don't record these as we only care about defined ones.
+    if (elf_sym[sym_index].st_shndx == SHN_UNDEF) {
+      continue;
+    }
+
     // TODO(fmzakar): This is helpful for debugging. Use GLOG?
     // std::cout << library << " " << demangled_sym_name << std::endl;
     s << "('" << demangled_sym_name << "','" << library << "'"
