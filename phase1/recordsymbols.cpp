@@ -235,8 +235,8 @@ unsigned int la_objopen(struct link_map *map, Lmid_t lmid, uintptr_t *cookie) {
     library = "main";
   }
   std::ostringstream s;
-  s << "INSERT INTO Libraries(Name, Path) VALUES ('" << map->l_name << "','"
-    << library << "'"
+  s << "INSERT INTO Libraries(Name, Path) VALUES ('" << library << "','"
+    << map->l_name << "'"
     << ");";
   std::string sql = s.str();
 
@@ -251,7 +251,7 @@ unsigned int la_objopen(struct link_map *map, Lmid_t lmid, uintptr_t *cookie) {
   }
 
   // store reference of the cookie as we will need it later
-  cookie_map.insert({*cookie, std::string(map->l_name)});
+  cookie_map.insert({*cookie, library});
 
   // Keep reference to sections we care about
   const char *strtab = nullptr;
@@ -397,6 +397,21 @@ uintptr_t la_symbind32(Elf32_Sym *sym, unsigned int ndx, uintptr_t *refcook,
     exit(1);
   }
   auto ref_library = ref_library_it->second;
+  std::string demangled_sym_name = demangle(symname);
+
+  std::ostringstream s;
+  s << "INSERT INTO Usages(Library, Symbol) VALUES ('" << ref_library << "','"
+    << demangled_sym_name << "'"
+    << ");";
+  std::string sql = s.str();
+  char *err_msg = nullptr;
+  int error = sqlite3_exec(db, sql.c_str(), 0, 0, &err_msg);
+  if (error != SQLITE_OK) {
+    std::cerr << err_msg << std::endl;
+    sqlite3_free(err_msg);
+    sqlite3_close(db);
+    exit(1);
+  }
 
   return sym->st_value;
 }
@@ -404,5 +419,27 @@ uintptr_t la_symbind32(Elf32_Sym *sym, unsigned int ndx, uintptr_t *refcook,
 uintptr_t la_symbind64(Elf64_Sym *sym, unsigned int ndx, uintptr_t *refcook,
                        uintptr_t *defcook, unsigned int *flags,
                        const char *symname) {
+  auto ref_library_it = cookie_map.find(*refcook);
+  if (ref_library_it == cookie_map.end()) {
+    std::cerr << "Could not find a cookie. Assertion failed." << std::endl;
+    exit(1);
+  }
+  auto ref_library = ref_library_it->second;
+  std::string demangled_sym_name = demangle(symname);
+
+  std::ostringstream s;
+  s << "INSERT INTO Usages(Library, Symbol) VALUES ('" << ref_library << "','"
+    << demangled_sym_name << "'"
+    << ");";
+  std::string sql = s.str();
+  char *err_msg = nullptr;
+  int error = sqlite3_exec(db, sql.c_str(), 0, 0, &err_msg);
+  if (error != SQLITE_OK) {
+    std::cerr << err_msg << std::endl;
+    sqlite3_free(err_msg);
+    sqlite3_close(db);
+    exit(1);
+  }
+
   return sym->st_value;
 }
